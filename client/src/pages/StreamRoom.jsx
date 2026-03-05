@@ -13,6 +13,10 @@ export default function StreamRoom({ role }) {
 
   // Ref so socket callbacks always read the live stream value
   const streamRef = useRef(null);
+  // Ref to the active screen track so we can stop it from the UI button
+  const screenTrackRef = useRef(null);
+  // Ref to track sharing state — avoids stale closure in shareScreen
+  const isSharingRef = useRef(false);
 
   const {
     createConnection,
@@ -97,13 +101,40 @@ export default function StreamRoom({ role }) {
     }
   }
 
+  function revertToCamera() {
+    const cameraTrack = streamRef.current?.getVideoTracks()[0];
+
+    Object.values(peerConnections.current).forEach((pc) => {
+      const sender = pc
+        .getSenders()
+        .find((s) => s.track && s.track.kind === "video");
+
+      if (sender && cameraTrack) sender.replaceTrack(cameraTrack);
+    });
+
+    screenTrackRef.current = null;
+    isSharingRef.current = false;
+    setIsSharing(false);
+  }
+
   async function shareScreen() {
+    // If already sharing, stop — use ref to avoid stale closure
+    if (isSharingRef.current) {
+      if (screenTrackRef.current) {
+        screenTrackRef.current.onended = null; // prevent double call
+        screenTrackRef.current.stop();
+      }
+
+      revertToCamera(); // immediately switch back
+      return;
+    }
     try {
       const screenStream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
       });
 
       const screenTrack = screenStream.getVideoTracks()[0];
+      screenTrackRef.current = screenTrack;
 
       // Replace video track in ALL peer connections
       Object.values(peerConnections.current).forEach((pc) => {
@@ -114,22 +145,11 @@ export default function StreamRoom({ role }) {
         if (sender) sender.replaceTrack(screenTrack);
       });
 
+      isSharingRef.current = true;
       setIsSharing(true);
 
-      // Revert to camera when screen share ends
-      screenTrack.onended = () => {
-        const cameraTrack = streamRef.current?.getVideoTracks()[0];
-
-        Object.values(peerConnections.current).forEach((pc) => {
-          const sender = pc
-            .getSenders()
-            .find((s) => s.track && s.track.kind === "video");
-
-          if (sender && cameraTrack) sender.replaceTrack(cameraTrack);
-        });
-
-        setIsSharing(false);
-      };
+      // Also handles browser's built-in "Stop sharing" button
+      screenTrack.onended = revertToCamera;
     } catch (err) {
       console.error("Screen share failed:", err);
     }
